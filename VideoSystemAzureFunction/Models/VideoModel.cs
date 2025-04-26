@@ -13,6 +13,6 @@ namespace VideoSystemAzureFunction.Models
         public string BlobUri { get; set; }
         public string FileName { get; set; }
         public string FileExtension { get; set; }
-        public string FolderPath { get; set; }
+        public string BlobName { get; set; }
     }
 }
