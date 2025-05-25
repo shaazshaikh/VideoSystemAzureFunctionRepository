@@ -14,5 +14,6 @@ namespace VideoSystemAzureFunction.Models
         public string FileName { get; set; }
         public string FileExtension { get; set; }
         public string BlobName { get; set; }
+        public string FilePath { get; set; }
     }
 }
