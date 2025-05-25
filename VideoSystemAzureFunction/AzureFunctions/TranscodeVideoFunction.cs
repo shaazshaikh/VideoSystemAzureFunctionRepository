@@ -5,6 +5,7 @@ using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using VideoSystemAzureFunction.Models;
+using System.Diagnostics;
 
 namespace VideoSystemAzureFunction.AzureFunctions
 {
@@ -40,13 +41,89 @@ namespace VideoSystemAzureFunction.AzureFunctions
                 token = await tokenReponse.Content.ReadAsStringAsync();               
             }
 
-            using(var fileClient = new HttpClient())
+            string sasUri = string.Empty;
+            using (var fileClient = new HttpClient())
             {
                 fileClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 var fileBlobUri = $"https://localhost:7082/api/file/getSASUrl?filePath={Uri.EscapeDataString(videoMessage.BlobName)}";
                 var sasResponse = await fileClient.GetAsync(fileBlobUri);
-                var sasUri = await sasResponse.Content.ReadAsStringAsync();
+                sasUri = await sasResponse.Content.ReadAsStringAsync();
+                sasUri = sasUri.Trim().Trim('"');
             }
+
+            var homeDirectory = @"C:\Complete backup\Windows backup\InputVideos";
+            var blobRelativePath = videoMessage.BlobName.Replace("/", Path.DirectorySeparatorChar.ToString());
+            var inputVideoPath = Path.Combine(homeDirectory, blobRelativePath);
+            var inputVideoDirectory = Path.GetDirectoryName(inputVideoPath);
+            if (!string.IsNullOrEmpty(inputVideoDirectory))
+            {
+                try
+                {
+                    Directory.CreateDirectory(inputVideoDirectory);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"Failed to create directory: {inputVideoDirectory}, Exception: {ex}");
+                    throw;
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Input video directory path is null or empty.");
+            }
+                        
+            using (var httpClient = new HttpClient())
+            {
+                using (var stream = await httpClient.GetStreamAsync(sasUri))
+                {
+                    using (var fileStream = File.Create(inputVideoPath))
+                    {
+                        await stream.CopyToAsync(fileStream);
+                    }
+                }
+            }
+
+            var resolutions = new Dictionary<string, string>
+            {
+                { "360p", "640x360" },
+                { "480p", "854x480" },
+                { "720p", "1280x720" }
+            };
+
+            foreach(var resolution in resolutions)
+            {
+                var outputDirectory = Path.Combine(inputVideoDirectory, $"{Path.GetFileNameWithoutExtension(videoMessage.BlobName)}-{resolution.Key}");
+                Directory.CreateDirectory(outputDirectory);
+                var outputPath = Path.Combine(outputDirectory, "playlist.m3u8");
+
+                var ffmpegArguments = $"-i \"{inputVideoPath}\" -vf scale={resolution.Value} -profile:v baseline -level 3.0 -start_number 0 -hls_time 10 -hls_list_size 0 -f hls \"{outputPath}\"";
+
+                var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "ffmpeg",
+                        Arguments = ffmpegArguments,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                };
+                process.Start();
+                string output = await process.StandardError.ReadToEndAsync();
+                await process.WaitForExitAsync();
+
+                if(process.ExitCode != 0)
+                {
+                    _logger.LogError($"FFmpeg failed for {resolution.Key} and resolution: {output}");
+                }
+                else
+                {
+                    _logger.LogInformation($"Successfully transcoded {resolution.Key} resolution to {outputPath}");
+                }
+            }
+            _logger.LogInformation("Resolutions completed");
         }
     }
 }
