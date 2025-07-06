@@ -6,16 +6,25 @@ using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using VideoSystemAzureFunction.Models;
 using System.Diagnostics;
+using Azure.Storage.Blobs;
+using Azure.Storage;
 
 namespace VideoSystemAzureFunction.AzureFunctions
 {
     public class TranscodeVideoFunction
     {
         private readonly ILogger<TranscodeVideoFunction> _logger;
-
+        private readonly BlobServiceClient _blobServiceClient;
+        private readonly string? _storageAccountAccessKey;
+        private readonly string? _storageAccountName;
         public TranscodeVideoFunction(ILogger<TranscodeVideoFunction> logger)
         {
             _logger = logger;
+            _storageAccountName = Environment.GetEnvironmentVariable("FileStorage:StorageAccountName");
+            _storageAccountAccessKey = Environment.GetEnvironmentVariable("FileStorage:StorageAccountAccessKey");
+            var credential = new StorageSharedKeyCredential(_storageAccountName, _storageAccountAccessKey);
+            var blobUri = $"https://{_storageAccountName}.blob.core.windows.net";
+            _blobServiceClient = new BlobServiceClient(new Uri(blobUri), credential);
         }
 
         [Function(nameof(TranscodeVideoFunction))]
@@ -51,7 +60,8 @@ namespace VideoSystemAzureFunction.AzureFunctions
                 sasUri = sasUri.Trim().Trim('"');
             }
 
-            var homeDirectory = @"C:\Complete backup\Windows backup\InputVideos";
+            var homeDirectory = Path.GetTempPath();
+            var blobVideoDirectory = Path.GetDirectoryName(videoMessage.BlobName).Replace("\\", "/");
             var blobRelativePath = videoMessage.BlobName.Replace("/", Path.DirectorySeparatorChar.ToString());
             var inputVideoPath = Path.Combine(homeDirectory, blobRelativePath);
             var inputVideoDirectory = Path.GetDirectoryName(inputVideoPath);
@@ -92,7 +102,8 @@ namespace VideoSystemAzureFunction.AzureFunctions
 
             foreach(var resolution in resolutions)
             {
-                var outputDirectory = Path.Combine(inputVideoDirectory, $"{Path.GetFileNameWithoutExtension(videoMessage.BlobName)}-{resolution.Key}");
+                var blobFileNameWithoutExtension = Path.GetFileNameWithoutExtension(videoMessage.BlobName);
+                var outputDirectory = Path.Combine(inputVideoDirectory, $"{blobFileNameWithoutExtension}-{resolution.Key}");
                 Directory.CreateDirectory(outputDirectory);
                 var outputPath = Path.Combine(outputDirectory, "playlist.m3u8");
 
@@ -122,8 +133,48 @@ namespace VideoSystemAzureFunction.AzureFunctions
                 {
                     _logger.LogInformation($"Successfully transcoded {resolution.Key} resolution to {outputPath}");
                 }
+
+                string blobVideoFolderPath = $"{blobVideoDirectory}/{blobFileNameWithoutExtension}-{resolution.Key}";
+                string streamingBlobUrl = await UploadCreatedFolderToBlobAsync(outputDirectory, blobVideoFolderPath);
+
+                using(var fileClient = new HttpClient())
+                {
+                    var modelBody = new
+                    {
+                        StreamingPath = streamingBlobUrl,
+                        FileId = videoMessage.FileId,
+                        Type = "mp4",
+                        Resolution = resolution.Key
+                    };
+                    var jsonBody = new StringContent(JsonConvert.SerializeObject(modelBody), Encoding.UTF8, "application/json");
+                    fileClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    var response = await fileClient.PostAsync("https://localhost:7082/api/file/StorePlaylistFile", jsonBody);
+                    var isEntryAdded = await response.Content.ReadAsStringAsync();
+                }
             }
             _logger.LogInformation("Resolutions completed");
+        }
+
+        public async Task<string> UploadCreatedFolderToBlobAsync(string folderPath, string blobVideoFolderPath)
+        {
+            var blobContainer = _blobServiceClient.GetBlobContainerClient(Environment.GetEnvironmentVariable("FileStorage:FileContainerName"));
+            string streamingBlobUrl = string.Empty;
+
+            foreach(var filePath in Directory.GetFiles(folderPath))
+            {
+                var fileName = Path.GetFileName(filePath);
+                var blobClient = blobContainer.GetBlobClient($"{blobVideoFolderPath}/{fileName}");
+                using (var fileStream = File.OpenRead(filePath))
+                {
+                    await blobClient.UploadAsync(fileStream, overwrite: true);
+                }
+                
+                if(fileName.EndsWith(".m3u8"))
+                {
+                    streamingBlobUrl = blobClient.Uri.ToString();
+                }
+            }
+            return streamingBlobUrl;
         }
     }
 }
