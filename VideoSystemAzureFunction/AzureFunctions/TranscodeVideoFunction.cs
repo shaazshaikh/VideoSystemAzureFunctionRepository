@@ -65,6 +65,11 @@ namespace VideoSystemAzureFunction.AzureFunctions
             var blobRelativePath = videoMessage.BlobName.Replace("/", Path.DirectorySeparatorChar.ToString());
             var inputVideoPath = Path.Combine(homeDirectory, blobRelativePath);
             var inputVideoDirectory = Path.GetDirectoryName(inputVideoPath);
+
+            var relativePath = Path.GetRelativePath(homeDirectory, inputVideoDirectory);
+            var firstFolderPath = relativePath.Split(Path.DirectorySeparatorChar)[0];
+            var inputViDeoDirectoryTempPath = Path.Combine(homeDirectory, firstFolderPath);
+
             if (!string.IsNullOrEmpty(inputVideoDirectory))
             {
                 try
@@ -152,7 +157,8 @@ namespace VideoSystemAzureFunction.AzureFunctions
                     var isEntryAdded = await response.Content.ReadAsStringAsync();
                 }
             }
-            _logger.LogInformation("Resolutions completed");
+            Directory.Delete(inputViDeoDirectoryTempPath, recursive: true);
+            _logger.LogInformation("Resolutions completed and local temporary folder deleted");
         }
 
         public async Task<string> UploadCreatedFolderToBlobAsync(string folderPath, string blobVideoFolderPath)
